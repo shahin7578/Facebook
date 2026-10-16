@@ -1,0 +1,340 @@
+import subprocess, sys
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "requests", "colorama"])
+
+import requests
+import time
+import re
+import os
+from datetime import datetime
+
+try:
+    from colorama import Fore, Style, init
+    init(autoreset=True)
+    GREEN, RED, YELLOW, CYAN = Fore.GREEN, Fore.RED, Fore.YELLOW, Fore.CYAN
+    RESET = Style.RESET_ALL
+except ImportError:
+    GREEN = RED = YELLOW = CYAN = RESET = ""
+
+
+API_TOKEN = "16029|h2SdEQm0tUYsyRojqKYVbNMdNln9loGyUGLF1wph8efb7b0d"
+
+CONFIG = {
+    "api_token": 16029|h2SdEQm0tUYsyRojqKYVbNMdNln9loGyUGLF1wph8efb7b0d,
+    "base_url": "https://api.tempmail.id.vn",
+    "user_profile": {
+        "first_name": "John",
+        "last_name": "Doe",
+        "password": "SecurePass@12345",
+        "birth_day": "15",
+        "birth_month": "6",
+        "birth_year": "1995",
+        "gender": "male"
+    },
+    "code_timeout": 240,
+    "poll_interval": 5,
+    "accounts_to_create": 1,
+    "save_file": "created_accounts.txt"
+}
+
+
+def log_info(msg):    print(f"{CYAN}[INFO]{RESET} {msg}")
+def log_success(msg): print(f"{GREEN}[OK]{RESET} {msg}")
+def log_warning(msg): print(f"{YELLOW}[WARN]{RESET} {msg}")
+def log_error(msg):   print(f"{RED}[ERR]{RESET} {msg}")
+
+
+class TempMailService:
+    def __init__(self, 16029|h2SdEQm0tUYsyRojqKYVbNMdNln9loGyUGLF1wph8efb7b0d, base_url):
+        self.api_token = 16029|h2SdEQm0tUYsyRojqKYVbNMdNln9loGyUGLF1wph8efb7b0d
+        self.base_url = base_url.rstrip("/")
+        self.current_email = None
+        self.seen_ids = set()
+        self.headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+
+    def test_api(self):
+        log_info("Testing API endpoints...")
+        endpoints = [
+            ("GET", f"{self.base_url}/api/email/new"),
+            ("GET", f"{self.base_url}/api/v1/email/new"),
+            ("GET", f"{self.base_url}/api/mail/new"),
+            ("POST", f"{self.base_url}/api/email/new"),
+            ("GET", f"{self.base_url}/api/emails/new"),
+            ("GET", f"{self.base_url}/api/inbox/new"),
+            ("GET", f"{self.base_url}/api/domains"),
+        ]
+        for method, url in endpoints:
+            try:
+                if method == "GET":
+                    resp = requests.get(url, headers=self.headers, timeout=10)
+                else:
+                    resp = requests.post(url, headers=self.headers, json={}, timeout=10)
+                if resp.status_code in [200, 201]:
+                    log_success(f"Working: {method} {url} -> {resp.status_code}")
+                    return (method, url)
+                else:
+                    print(f"   x {method} {url} -> {resp.status_code}")
+            except Exception as e:
+                print(f"   x {method} {url} -> {e}")
+        return None
+
+    def get_email(self):
+        working = self.test_api()
+        print()
+        if working:
+            method, url = working
+            try:
+                if method == "POST":
+                    resp = requests.post(url, headers=self.headers, json={}, timeout=15)
+                else:
+                    resp = requests.get(url, headers=self.headers, timeout=15)
+                if resp.status_code in [200, 201]:
+                    data = resp.json()
+                    email = self._extract_email_from_response(data)
+                    if email:
+                        self.current_email = email
+                        log_success(f"Temp email: {email}")
+                        return email
+            except Exception as e:
+                log_error(f"Error: {e}")
+
+        print(f"\n{YELLOW}API working na. Manual email din.{RESET}")
+        try:
+            manual = input(f"{YELLOW}Email likhun: {RESET}").strip()
+            if manual and "@" in manual:
+                self.current_email = manual
+                log_success(f"Using: {manual}")
+                return manual
+        except Exception:
+            pass
+        return None
+
+    def _extract_email_from_response(self, data):
+        if isinstance(data, dict):
+            for path in [["email"], ["address"], ["data","email"], ["data","address"],
+                         ["result","email"], ["result","address"], ["email_address"]]:
+                current = data
+                try:
+                    for key in path:
+                        current = current[key]
+                    if current and "@" in str(current):
+                        return str(current)
+                except (KeyError, TypeError):
+                    continue
+        if isinstance(data, str) and "@" in data:
+            return data
+        return None
+
+    def get_messages(self):
+        if not self.current_email:
+            return []
+        endpoints = [
+            f"{self.base_url}/api/email/messages",
+            f"{self.base_url}/api/messages",
+            f"{self.base_url}/api/inbox",
+            f"{self.base_url}/api/emails",
+            f"{self.base_url}/api/email/inbox",
+        ]
+        for url in endpoints:
+            try:
+                resp = requests.get(url, headers=self.headers,
+                                    params={"email": self.current_email}, timeout=15)
+                if resp.status_code == 200:
+                    msgs = self._extract_messages(resp.json())
+                    if msgs is not None:
+                        return msgs
+                resp = requests.get(f"{url}/{self.current_email}",
+                                    headers=self.headers, timeout=15)
+                if resp.status_code == 200:
+                    msgs = self._extract_messages(resp.json())
+                    if msgs is not None:
+                        return msgs
+            except Exception:
+                continue
+        return []
+
+    def _extract_messages(self, data):
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ["messages", "data", "emails", "inbox", "result", "items"]:
+                if key in data:
+                    val = data[key]
+                    if isinstance(val, list):
+                        return val
+                    if isinstance(val, dict):
+                        for sub in ["messages", "emails", "items"]:
+                            if sub in val and isinstance(val[sub], list):
+                                return val[sub]
+        return None
+
+    def wait_for_code(self, timeout=240):
+        log_info(f"Waiting for code ({timeout}s)...")
+        start = time.time()
+        dots = 0
+        while time.time() - start < timeout:
+            for msg in self.get_messages():
+                mid = msg.get("id") or msg.get("_id") or msg.get("uid")
+                if mid and mid in self.seen_ids:
+                    continue
+                if mid:
+                    self.seen_ids.add(mid)
+                body = self._get_body(msg)
+                code = self._extract_code(body)
+                if code:
+                    print()
+                    log_success(f"Code: {code}")
+                    return code
+            dots += 1
+            print(".", end="", flush=True)
+            if dots % 12 == 0:
+                print(f" [{int(time.time()-start)}s]", end="", flush=True)
+            time.sleep(CONFIG["poll_interval"])
+        print()
+        log_warning("Timeout")
+        return None
+
+    def _get_body(self, msg):
+        if isinstance(msg, str):
+            return msg
+        parts = []
+        for key in ["body", "text", "html", "content", "message", "snippet", "subject"]:
+            if key in msg and msg[key]:
+                parts.append(str(msg[key]))
+        if "data" in msg and isinstance(msg["data"], dict):
+            for key in ["body", "text", "html", "content"]:
+                if key in msg["data"] and msg["data"][key]:
+                    parts.append(str(msg["data"][key]))
+        return " ".join(parts)
+
+    @staticmethod
+    def _extract_code(text):
+        if not text:
+            return None
+        for pattern in [
+            r"\b(\d{6})\b",
+            r"\b(\d{5})\b",
+            r"code[\s:]+(\d{4,6})",
+            r"(\d{6})\s+is your",
+            r">\s*(\d{6})\s*<",
+            r"FB-(\d{6})",
+        ]:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                return match.group(1)
+        return None
+
+
+def save_account(email, password, filename):
+    with open(filename, "a", encoding="utf-8") as f:
+        f.write(f"{email}:{password}\n")
+    log_success(f"Saved to {filename}")
+
+
+def download_file(filename):
+    try:
+        from google.colab import files
+        files.download(filename)
+        log_success("File downloaded")
+    except Exception as e:
+        log_warning(f"Download skipped: {e}")
+
+
+def run_workflow():
+    print("\n" + "=" * 60)
+    print(f"{CYAN}META AI ACCOUNT CREATION WORKFLOW{RESET}")
+    print("=" * 60)
+    print(f"Token: {API_TOKEN[:15]}...{API_TOKEN[-10:]}")
+    print(f"URL: {CONFIG['base_url']}")
+    print("=" * 60 + "\n")
+
+    mail = TempMailService(API_TOKEN, CONFIG["base_url"])
+    total = CONFIG["accounts_to_create"]
+    success = 0
+    failed = 0
+    created = []
+
+    for i in range(total):
+        print("\n" + "-" * 60)
+        print(f"{CYAN}Account {i+1}/{total}{RESET}")
+        print("-" * 60)
+
+        email = mail.get_email()
+        if not email:
+            log_error("Failed to get email")
+            failed += 1
+            continue
+
+        print()
+        print("=" * 60)
+        print(f"{YELLOW}YOUR TEMP EMAIL:{RESET}")
+        print(f"{GREEN}>>> {email} <<<{RESET}")
+        print("=" * 60)
+        print()
+        print(f"{CYAN}STEPS:{RESET}")
+        print(f"  1. Copy email above")
+        print(f"  2. Open facebook.com/reg")
+        print(f"  3. Fill form:")
+        print(f"     First name: {CONFIG['user_profile']['first_name']}")
+        print(f"     Last name : {CONFIG['user_profile']['last_name']}")
+        print(f"     Email     : {email}")
+        print(f"     Password  : {CONFIG['user_profile']['password']}")
+        print(f"     Birthday  : {CONFIG['user_profile']['birth_day']}/{CONFIG['user_profile']['birth_month']}/{CONFIG['user_profile']['birth_year']}")
+        print(f"     Gender    : {CONFIG['user_profile']['gender']}")
+        print(f"  4. Sign Up click")
+        print(f"  5. Captcha solve manually")
+        print(f"  6. Return to Colab")
+        print()
+        print(f"{YELLOW}Code check starting in 30s...{RESET}")
+        print()
+
+        for sec in range(30, 0, -1):
+            print(f"\r{sec}s remaining... ", end="", flush=True)
+            time.sleep(1)
+        print()
+
+        code = mail.wait_for_code(timeout=CONFIG["code_timeout"])
+
+        if code:
+            print()
+            print("=" * 60)
+            print(f"{GREEN}VERIFICATION CODE: {code}{RESET}")
+            print("=" * 60)
+            print(f"{YELLOW}Enter this on Facebook{RESET}")
+            print("=" * 60)
+            save_account(email, CONFIG["user_profile"]["password"], CONFIG["save_file"])
+            created.append({
+                "email": email,
+                "password": CONFIG["user_profile"]["password"],
+                "code": code,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+            success += 1
+        else:
+            failed += 1
+
+        if i < total - 1:
+            print(f"\n{CYAN}Waiting 10s...{RESET}")
+            time.sleep(10)
+
+    print("\n" + "=" * 60)
+    print(f"{CYAN}SUMMARY{RESET}")
+    print("=" * 60)
+    log_success(f"Success: {success}")
+    if failed:
+        log_error(f"Failed : {failed}")
+    print("=" * 60)
+
+    if created:
+        print(f"\n{CYAN}Created Accounts:{RESET}")
+        for acc in created:
+            print(f"  {acc['email']}")
+            print(f"    Password: {acc['password']}")
+            print(f"    Code    : {acc['code']}")
+            print(f"    Time    : {acc['time']}\n")
+        if os.path.exists(CONFIG["save_file"]):
+            download_file(CONFIG["save_file"])
